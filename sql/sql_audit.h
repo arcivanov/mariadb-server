@@ -123,6 +123,9 @@ void mysql_audit_general_log(THD *thd, time_t time,
       event.general_charset= thd->variables.character_set_client;
       event.database= thd->db;
       event.query_id= thd->query_id;
+      event.query_seqnum= thd->query_seqnum;
+      DBUG_PRINT("info", ("mysql_audit_general_log: query_seqnum to %lld, query_id=%lld, query=%.60s", 
+                          thd->query_seqnum, thd->query_id, thd->query()));
     }
     else
     {
@@ -130,6 +133,7 @@ void mysql_audit_general_log(THD *thd, time_t time,
       event.general_charset= global_system_variables.character_set_client;
       event.database= null_clex_str;
       event.query_id= 0;
+      event.query_seqnum= 0;
     }
 
     mysql_audit_notify(thd, MYSQL_AUDIT_GENERAL_CLASS, &event);
@@ -175,6 +179,9 @@ void mysql_audit_general(THD *thd, uint event_subtype,
       event.general_rows= thd->get_stmt_da()->current_row_for_warning();
       event.database= thd->db;
       event.query_id= thd->query_id;
+      event.query_seqnum= thd->query_seqnum;
+      DBUG_PRINT("info", ("mysql_audit_general: query_seqnum to %lld, query_id=%lld, query=%.60s", 
+                          thd->query_seqnum, thd->query_id, thd->query()));
     }
     else
     {
@@ -187,6 +194,7 @@ void mysql_audit_general(THD *thd, uint event_subtype,
       event.general_rows= 0;
       event.database= null_clex_str;
       event.query_id= 0;
+      event.query_seqnum= 0;
     }
 
     mysql_audit_notify(thd, MYSQL_AUDIT_GENERAL_CLASS, &event);

@@ -1,0 +1,107 @@
+--source include/have_innodb.inc
+--source include/have_plugin_auth.inc
+--source include/not_embedded.inc
+
+if (!$SERVER_AUDIT_SO) {
+  skip No SERVER_AUDIT plugin;
+}
+
+# An unfortunate wait for check-testcase.inc to complete disconnect.
+let count_sessions= 1;
+source include/wait_until_count_sessions.inc;
+
+let $MYSQLD_DATADIR= `SELECT @@datadir`;
+let SEARCH_FILE= $MYSQLD_DATADIR/server_audit_seqnum.log;
+
+--echo #
+--echo # MDEV-37004: Audit Plugin not in correct order for AFTER trigger
+--echo #
+
+# Install the plugin and configure it exactly as in the JIRA ticket
+install plugin server_audit soname 'server_audit';
+
+set global server_audit_file_path='server_audit_seqnum.log';
+set global server_audit_output_type=file;
+set global server_audit_mode=0;
+set global server_audit_events='QUERY';
+set global server_audit_log_query_seqnum=ON;
+set global server_audit_logging=on;
+
+--echo # Enable query_seqnum logging to distinguish statements
+set global server_audit_log_query_seqnum=ON;
+
+--echo # Create test database and tables as in JIRA
+CREATE DATABASE IF NOT EXISTS test;
+USE test;
+
+--echo # Create tables exactly as in MDEV-37004
+CREATE TABLE source (
+  id bigint(20) NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+
+CREATE TABLE dest (
+  id bigint(20) NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+
+CREATE TABLE dest_2 (
+  id bigint(20) NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+
+--echo # Create the trigger exactly as in MDEV-37004
+DELIMITER //;
+CREATE TRIGGER test_trigger 
+AFTER INSERT ON source 
+FOR EACH ROW 
+INSERT INTO dest (id) VALUES(NEW.id)//
+DELIMITER ;//
+
+--echo # Create the trigger exactly as in MDEV-37004
+DELIMITER //;
+CREATE TRIGGER test_trigger_2
+AFTER INSERT ON dest 
+FOR EACH ROW 
+INSERT INTO dest_2 (id) VALUES(NEW.id)//
+DELIMITER ;//
+
+--echo # Insert a row to trigger the AFTER trigger
+INSERT INTO source VALUES (NULL);
+
+--echo # Insert another row to see the pattern
+INSERT INTO source VALUES (NULL);
+
+--echo # Test with multi-row insert
+INSERT INTO source VALUES (NULL), (NULL);
+
+--echo # Test with multi-row insert within transaction
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+INSERT INTO source VALUES (NULL), (NULL);
+COMMIT;
+
+--echo # Clean up
+DROP TABLE source, dest;
+DROP DATABASE test;
+
+--echo # Wait for audit events to be written
+--sleep 1
+
+set global server_audit_logging=off;
+uninstall plugin server_audit;
+
+--echo #
+--echo # Check the audit log output
+--echo # According to MDEV-37004, the issue is that trigger statements appear
+--echo # in the log BEFORE the triggering statement, despite both having the
+--echo # same query_id. With query_seqnum, we should see:
+--echo # - Main INSERT with query_seqnum=0
+--echo # - Trigger INSERT with query_seqnum=1
+--echo # But currently they appear in wrong order in the log.
+--echo #
+
+# Output the log without heavy replacements so we can see the actual order
+--replace_regex /\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d/TIMESTAMP/ /\,[^,]+,root,localhost,/,HOSTNAME,root,localhost,/
+cat_file $MYSQLD_DATADIR/server_audit_seqnum.log;
+remove_file $MYSQLD_DATADIR/server_audit_seqnum.log;

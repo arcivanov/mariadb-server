@@ -3836,6 +3836,14 @@ sp_instr_stmt::execute(THD *thd, uint *nextp)
   if (!(res= alloc_query(thd, m_query.str, m_query.length)) &&
       !(res=subst_spvars(thd, this, &m_query)))
   {
+    query_id_t save_query_seqnum= thd->query_seqnum;
+    if(thd->in_sub_stmt)
+    {
+      thd->query_seqnum++;
+      DBUG_PRINT("info", ("sp_instr_stmt::execute: query: %.*s, query_id=%lld, query_seqnum from %lld to %lld", 
+        (uint) thd->query_length(), thd->query(), thd->query_id, save_query_seqnum, thd->query_seqnum));
+    }
+
     /*
       (the order of query cache and subst_spvars calls is irrelevant because
       queries with SP vars can't be cached)
@@ -3896,6 +3904,10 @@ sp_instr_stmt::execute(THD *thd, uint *nextp)
       res= 0;
       thd->get_stmt_da()->reset_diagnostics_area();
     }
+
+    DBUG_PRINT("info", ("sp_instr_stmt::execute: query: %.*s, query_id=%lld, query_seqnum from %lld to %lld", 
+        (uint) thd->query_length(), thd->query(), thd->query_id, thd->query_seqnum, save_query_seqnum));
+    thd->set_query_seqnum(save_query_seqnum);
   }
 
   DBUG_RETURN(res || thd->is_error());

@@ -29,7 +29,8 @@ extern "C" {
 
 #define MYSQL_AUDIT_CLASS_MASK_SIZE 1
 
-#define MYSQL_AUDIT_INTERFACE_VERSION 0x0302
+#define MYSQL_AUDIT_INTERFACE_VERSION 0x0304
+
 
 
 /*************************************************************************
@@ -66,6 +67,8 @@ struct mysql_event_general
   unsigned long long general_rows;
   /* Added in version 0x302 */
   unsigned long long query_id;
+  /* Added in version 0x304 */
+  unsigned long long query_seqnum;
   MYSQL_CONST_LEX_STRING database;
 };
 

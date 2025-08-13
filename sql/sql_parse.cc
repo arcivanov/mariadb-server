@@ -1641,7 +1641,10 @@ dispatch_command_return dispatch_command(enum enum_server_command command, THD *
 
   thd->set_time();
   if (!(server_command_flags[command] & CF_SKIP_QUERY_ID))
+  {
     thd->set_query_id(next_query_id());
+    thd->reset_query_seqnum();
+  }
   else
   {
     /*
@@ -1649,6 +1652,7 @@ dispatch_command_return dispatch_command(enum enum_server_command command, THD *
       No reason to increase query id here.
     */
     thd->set_query_id(get_query_id());
+    thd->reset_query_seqnum();
   }
 #ifdef WITH_WSREP
   if (WSREP(thd) && thd->wsrep_next_trx_id() == WSREP_UNDEFINED_TRX_ID)
@@ -1974,6 +1978,7 @@ dispatch_command_return dispatch_command(enum enum_server_command command, THD *
 
       thd->set_query_and_id(beginning_of_next_stmt, length,
                             thd->charset(), next_query_id());
+      thd->reset_query_seqnum();
 
       /*
         Count each statement from the client.

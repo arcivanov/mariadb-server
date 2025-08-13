@@ -6227,6 +6227,7 @@ void THD::set_query_and_id(char *query_arg, uint32 query_length_arg,
   set_query_inner(query_arg, query_length_arg, cs);
   mysql_mutex_unlock(&LOCK_thd_data);
   query_id= new_query_id;
+  query_seqnum= 0;
 #ifdef WITH_WSREP
   set_wsrep_next_trx_id(query_id);
   WSREP_DEBUG("assigned new next query and  trx id: %" PRIu64, wsrep_next_trx_id());

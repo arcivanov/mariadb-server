@@ -3610,6 +3610,11 @@ public:
     update auto-updatable fields (like auto_increment and timestamp).
   */
   query_id_t query_id;
+  /*
+    A way to identify the statement within a single query, such as when 
+    multiple statements in AFTER-triggers. 
+  */
+  query_id_t query_seqnum;
   privilege_t col_access;
 
   /* Statement id is thread-wide. This counter is used to generate ids */
@@ -5184,8 +5189,17 @@ public:
   { set_query(CSET_STRING()); }
   void set_query_and_id(char *query_arg, uint32 query_length_arg,
                         CHARSET_INFO *cs, query_id_t new_query_id);
+  void reset_query_seqnum() 
+  {
+    query_seqnum= 0;
+  }
+  void set_query_seqnum(query_id_t new_query_seqnum) 
+  {
+    query_seqnum= new_query_seqnum;
+  }
   void set_query_id(query_id_t new_query_id)
   {
+    // DBUG_PRINT("info", ("set_query_id: current id=%lld, new id=%lld, current seqnum= %lld", query_id, new_query_id, query_seqnum));
     query_id= new_query_id;
 #ifdef WITH_WSREP
     if (WSREP_NNULL(this))

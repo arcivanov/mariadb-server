@@ -15,7 +15,7 @@
    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 
-#define PLUGIN_VERSION 0x104
+#define PLUGIN_VERSION 0x105
 #define PLUGIN_STR_VERSION "1.4.14"
 
 #define _my_thread_var loc_thread_var
@@ -298,6 +298,7 @@ static char *incl_users, *excl_users,
             *file_path, *syslog_info;
 static char path_buffer[FN_REFLEN];
 static unsigned int mode, mode_readonly= 0;
+static my_bool log_query_seqnum= 0;
 static ulong output_type;
 static ulong syslog_facility, syslog_priority;
 
@@ -321,6 +322,7 @@ struct connection_info
   int header;
   unsigned long thread_id;
   unsigned long long query_id;
+  unsigned long long query_seqnum;
   char db[256];
   int db_length;
   char user[USERNAME_CHAR_LENGTH+1];
@@ -449,6 +451,9 @@ static MYSQL_SYSVAR_STR(syslog_info, syslog_info,
 static MYSQL_SYSVAR_UINT(query_log_limit, query_log_limit,
        PLUGIN_VAR_OPCMDARG, "Limit on the length of the query string in a record.",
        NULL, NULL, 1024, 0, 0x7FFFFFFF, 1);
+static MYSQL_SYSVAR_BOOL(log_query_seqnum, log_query_seqnum,
+       PLUGIN_VAR_OPCMDARG, "Log query sequence number to distinguish statements with the same query_id (triggers, functions, etc)",
+       NULL, NULL, FALSE);
 
 char locinfo_ini_value[sizeof(struct connection_info)+4];
 
@@ -539,6 +544,7 @@ static struct st_mysql_sys_var* vars[] = {
     MYSQL_SYSVAR(syslog_facility),
     MYSQL_SYSVAR(syslog_priority),
     MYSQL_SYSVAR(query_log_limit),
+    MYSQL_SYSVAR(log_query_seqnum),
     MYSQL_SYSVAR(loc_info),
     NULL
 };
@@ -1309,6 +1315,7 @@ static void setup_connection_initdb(struct connection_info *cn,
 
   cn->thread_id= event->general_thread_id;
   cn->query_id= 0;
+  cn->query_seqnum= event->query_seqnum;
   cn->query_length= 0;
   cn->log_always= 0;
   get_str_n(cn->db, &cn->db_length, sizeof(cn->db),
@@ -1363,6 +1370,7 @@ static void setup_connection_query(struct connection_info *cn,
 
   cn->thread_id= event->general_thread_id;
   cn->query_id= query_counter++;
+  cn->query_seqnum= event->query_seqnum;
   cn->log_always= 0;
   cn->query_length= 0;
   get_str_n(cn->db, &cn->db_length, sizeof(cn->db), "", 0);
@@ -1452,7 +1460,8 @@ static size_t log_header(char *message, size_t message_len,
                       const char *username, unsigned int username_len,
                       const char *host, unsigned int host_len,
                       const char *userip, unsigned int userip_len,
-                      unsigned int connection_id, long long query_id,
+                      unsigned int connection_id,
+                      long long query_id, long long query_seqnum,
                       const char *operation)
 {
   struct tm tm_time;
@@ -1474,22 +1483,42 @@ static size_t log_header(char *message, size_t message_len,
   }
 
   if (output_type == OUTPUT_SYSLOG)
+  {
+    if (log_query_seqnum)
+      return my_snprintf(message, message_len,
+          "%.*s,%.*s,%.*s,%d,%lld,%lld,%s",
+          (int) serverhost_len, serverhost,
+          username_len, username,
+          host_len, host,
+          connection_id, query_id, query_seqnum, operation);
+    else
+      return my_snprintf(message, message_len,
+          "%.*s,%.*s,%.*s,%d,%lld,%s",
+          (int) serverhost_len, serverhost,
+          username_len, username,
+          host_len, host,
+          connection_id, query_id, operation);
+  }
+
+  (void) localtime_r(ts, &tm_time);
+  if (log_query_seqnum)
     return my_snprintf(message, message_len,
-        "%.*s,%.*s,%.*s,%d,%lld,%s",
+        "%04d%02d%02d %02d:%02d:%02d,%.*s,%.*s,%.*s,%d,%lld,%lld,%s",
+        tm_time.tm_year+1900, tm_time.tm_mon+1, tm_time.tm_mday,
+        tm_time.tm_hour, tm_time.tm_min, tm_time.tm_sec,
+        (int) serverhost_len, serverhost,
+        username_len, username,
+        host_len, host,
+        connection_id, query_id, query_seqnum, operation);
+  else
+    return my_snprintf(message, message_len,
+        "%04d%02d%02d %02d:%02d:%02d,%.*s,%.*s,%.*s,%d,%lld,%s",
+        tm_time.tm_year+1900, tm_time.tm_mon+1, tm_time.tm_mday,
+        tm_time.tm_hour, tm_time.tm_min, tm_time.tm_sec,
         (int) serverhost_len, serverhost,
         username_len, username,
         host_len, host,
         connection_id, query_id, operation);
-
-  (void) localtime_r(ts, &tm_time);
-  return my_snprintf(message, message_len,
-      "%04d%02d%02d %02d:%02d:%02d,%.*s,%.*s,%.*s,%d,%lld,%s",
-      tm_time.tm_year+1900, tm_time.tm_mon+1, tm_time.tm_mday,
-      tm_time.tm_hour, tm_time.tm_min, tm_time.tm_sec,
-      (int) serverhost_len, serverhost,
-      username_len, username,
-      host_len, host,
-      connection_id, query_id, operation);
 }
 
 
@@ -1507,7 +1536,8 @@ static int log_proxy(const struct connection_info *cn,
                     cn->user, cn->user_length,
                     cn->host, cn->host_length,
                     cn->ip, cn->ip_length,
-                    event->thread_id, 0, "PROXY_CONNECT");
+                    event->thread_id,
+                    0, 0, "PROXY_CONNECT");
   csize+= my_snprintf(message+csize, sizeof(message) - 1 - csize,
     ",%.*s,`%.*s`@`%.*s`,%d", cn->db_length, cn->db,
                      cn->proxy_length, cn->proxy,
@@ -1532,7 +1562,8 @@ static int log_connection(const struct connection_info *cn,
                     cn->user, cn->user_length,
                     cn->host, cn->host_length,
                     cn->ip, cn->ip_length,
-                    event->thread_id, 0, type);
+                    event->thread_id, 0, 0, type);
+
   csize+= my_snprintf(message+csize, sizeof(message) - 1 - csize,
     ",%.*s,,%d", cn->db_length, cn->db, event->status);
   message[csize]= '\n';
@@ -1553,7 +1584,8 @@ static int log_connection_event(const struct mysql_event_connection *event,
                     event->user, event->user_length,
                     event->host, event->host_length,
                     event->ip, event->ip_length,
-                    event->thread_id, 0, type);
+                    event->thread_id, 0, 0, type);
+
   csize+= my_snprintf(message+csize, sizeof(message) - 1 - csize,
     ",%.*s,,%d", (int) event->database.length, event->database.str, event->status);
   message[csize]= '\n';
@@ -1879,6 +1911,7 @@ static int log_statement_ex(const struct connection_info *cn,
   const char *db;
   unsigned int db_length;
   long long query_id;
+  long long query_seqnum;
   int result;
   char *big_buffer= NULL;
 
@@ -1892,6 +1925,8 @@ static int log_statement_ex(const struct connection_info *cn,
 
   if (!(query_id= cn->query_id))
     query_id= query_counter++;
+  
+  query_seqnum= cn->query_seqnum;
 
   if (query == 0)
   {
@@ -1940,7 +1975,7 @@ do_log_query:
   csize= log_header(message, message_size-1, &ev_time,
                     servhost, servhost_len,
                     cn->user, cn->user_length,cn->host, cn->host_length,
-                    cn->ip, cn->ip_length, thd_id, query_id, type);
+                    cn->ip, cn->ip_length, thd_id, query_id, query_seqnum, type);
 
   csize+= my_snprintf(message+csize, message_size - 1 - csize,
       ",%.*s,\'", db_length, db);
@@ -2032,7 +2067,7 @@ static int log_table(const struct connection_info *cn,
                     event->user, SAFE_STRLEN_UI(event->user),
                     event->host, SAFE_STRLEN_UI(event->host),
                     event->ip, SAFE_STRLEN_UI(event->ip),
-                    event->thread_id, cn->query_id, type);
+                    event->thread_id, cn->query_id, cn->query_seqnum, type);
   csize+= my_snprintf(message+csize, sizeof(message) - 1 - csize, ",%.*s,%.*s,",
                      (int) event->database.length, event->database.str,
                      (int) event->table.length, event->table.str);
@@ -2054,7 +2089,9 @@ static int log_rename(const struct connection_info *cn,
                     event->user, SAFE_STRLEN_UI(event->user),
                     event->host, SAFE_STRLEN_UI(event->host),
                     event->ip, SAFE_STRLEN_UI(event->ip),
-                    event->thread_id, cn->query_id, "RENAME");
+                    event->thread_id,
+                    cn->query_id, cn->query_seqnum,
+                    "RENAME");
   csize+= my_snprintf(message+csize, sizeof(message) - 1 - csize,
                       ",%.*s,%.*s|%.*s.%.*s,",
                       (int) event->database.length, event->database.str,
@@ -2131,6 +2168,7 @@ static void update_connection_info(MYSQL_THD thd, struct connection_info *cn,
                   event->general_query, event->general_query_length);
           }
           cn->query_id= mode ? query_counter++ : event->query_id;
+          cn->query_seqnum= event->query_seqnum;
           cn->query= event->general_query;
           cn->query_length= event->general_query_length;
           cn->query_time= (time_t) event->general_time;
@@ -2171,6 +2209,7 @@ static void update_connection_info(MYSQL_THD thd, struct connection_info *cn,
                     event->database.str, event->database.length);
             }
           }
+          cn->query_seqnum= event->query_seqnum;
           update_general_user(cn, event);
         }
         break;
@@ -2183,6 +2222,7 @@ static void update_connection_info(MYSQL_THD thd, struct connection_info *cn,
         if (ci_needs_setup(cn))
           setup_connection_query(cn, event);
         cn->query_id= mode ? query_counter++ : event->query_id;
+        cn->query_seqnum= event->query_seqnum;
         get_str_n(cn->query_buffer, &cn->query_length, sizeof(cn->query_buffer),
             event->general_query, event->general_query_length);
         cn->query= cn->query_buffer;

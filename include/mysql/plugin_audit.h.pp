@@ -682,6 +682,7 @@ struct mysql_event_general
   unsigned long long general_time;
   unsigned long long general_rows;
   unsigned long long query_id;
+  unsigned long long query_seqnum;
   MYSQL_CONST_LEX_STRING database;
 };
 struct mysql_event_connection
