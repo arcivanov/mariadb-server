@@ -25755,6 +25755,7 @@ int test_if_use_dynamic_range_scan(JOIN_TAB *join_tab)
 int join_init_read_record(JOIN_TAB *tab)
 {
   bool need_unpacking= FALSE;
+  /* TODO: s/tab->join/join/g in this function */
   JOIN *join= tab->join;
   /* 
     Note: the query plan tree for the below operations is constructed in
@@ -25804,7 +25805,11 @@ int join_init_read_record(JOIN_TAB *tab)
   */
   save_copy=     tab->read_record.copy_field;
   save_copy_end= tab->read_record.copy_field_end;
-  
+
+  init_table_full_scan_if_needed(tab->table,
+                                 tab->select ? tab->select->cond : NULL,
+                                 join->unit->lim.get_select_limit());
+
   /*
     JT_NEXT means that we should use an index scan on index 'tab->index'
     However if filesort is set, the table was already sorted above
@@ -25875,6 +25880,10 @@ join_read_first(JOIN_TAB *tab)
               table->file->keyread == tab->index);
   tab->table->status=0;
   tab->read_record.table=table;
+  init_table_full_scan_if_needed(tab->table,
+                                 tab->select ? tab->select->cond : NULL,
+                                 tab->join->unit->lim.get_select_limit());
+
   if (tab->index >= table->s->keys)
   {
     ORDER *order= tab->full_index_scan_order;
@@ -25940,6 +25949,9 @@ join_read_last(JOIN_TAB *tab)
   tab->table->status=0;
   tab->read_record.read_record_func= join_read_prev;
   tab->read_record.table=table;
+  init_table_full_scan_if_needed(tab->table,
+                                 tab->select ? tab->select->cond : NULL,
+                                 tab->join->unit->lim.get_select_limit());
   if (!table->file->inited)
     error= table->file->ha_index_init(tab->index, 1);
   if (likely(!error))

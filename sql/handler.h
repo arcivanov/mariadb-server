@@ -6151,4 +6151,6 @@ enum table_hint_options
 };
 
 extern const char *table_hint_options;
+
+void init_table_full_scan_if_needed(TABLE *table, Item *cond, ha_rows limit);
 #endif /* HANDLER_INCLUDED */
