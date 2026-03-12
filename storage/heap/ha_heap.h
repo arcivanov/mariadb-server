@@ -27,6 +27,7 @@
 
 class ha_heap final : public handler
 {
+  friend class Hp_test_rebuild_blob_key;
   HP_INFO *file;
   HP_SHARE *internal_share;
   key_map btree_keys;
@@ -85,6 +86,10 @@ public:
   int index_read_map(uchar * buf, const uchar * key, key_part_map keypart_map,
                      enum ha_rkey_function find_flag) override;
   int index_read_last_map(uchar *buf, const uchar *key, key_part_map keypart_map) override;
+private:
+  void rebuild_blob_key(HP_KEYDEF *keydef, const uchar *key,
+                        uint active_key_index, const uchar **rebuilt_key);
+public:
   int index_read_idx_map(uchar * buf, uint index, const uchar * key,
                          key_part_map keypart_map,
                          enum ha_rkey_function find_flag) override;

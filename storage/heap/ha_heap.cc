@@ -286,25 +286,75 @@ int ha_heap::delete_row(const uchar * buf)
   return res;
 }
 
+/*
+  Rebuild SQL-layer key into HEAP's hp_make_key format for blob indexes.
+
+  The SQL layer builds keys using Field_blob::new_key_field() which
+  returns a Field_varstring.  The resulting key uses 2B length + inline
+  data format.  HEAP's hp_hashnr/hp_key_cmp expect hp_make_key format:
+  4B length + data pointer.
+
+  Additionally, the GROUP BY path (end_update) stores item values only
+  into the group buffer's Field_varstring, NOT into record[0]'s
+  Field_blob.  So record[0]'s blob fields may be stale or empty.
+
+  This method parses the SQL-layer key to extract blob data, populates
+  record[0]'s blob fields from it, then rebuilds via hp_make_key().
+  This keeps the key-format translation entirely in the HEAP handler.
+
+  Overhead: one pass over key segments (typically 1-2) with uint2korr +
+  two memcpy per blob segment, negligible vs the hash lookup that follows.
+*/
+void ha_heap::rebuild_blob_key(HP_KEYDEF *keydef, const uchar *key,
+                               uint active_key_index
+                                 __attribute__((unused)),
+                               const uchar **rebuilt_key)
+{
+  const uchar *key_pos= key;
+  for (uint seg_idx= 0; seg_idx < keydef->keysegs; seg_idx++)
+  {
+    HA_KEYSEG *seg= &keydef->seg[seg_idx];
+    if (seg->null_bit)
+      key_pos++;                                /* skip null flag byte */
+    if (seg->flag & HA_BLOB_PART)
+    {
+      /*
+        SQL-layer key format for blob: Field_varstring with 2B length
+        prefix + inline data.  Extract and store into record[0]'s
+        blob field (packlength + data pointer).
+      */
+      uint16 varchar_len= uint2korr(key_pos);
+      const uchar *varchar_data= key_pos + 2;
+      key_pos= varchar_data + varchar_len;
+
+      uint packlength= seg->bit_start;
+      uchar *blob_field= table->record[0] + seg->start;
+      uint32 blob_len= (uint32) varchar_len;
+      memcpy(blob_field, &blob_len, packlength);
+      memcpy(blob_field + packlength, &varchar_data, sizeof(void*));
+    }
+    else if (seg->flag & HA_VAR_LENGTH_PART)
+    {
+      /* VARCHAR: skip 2-byte length prefix + seg->length data bytes */
+      key_pos+= 2 + seg->length;
+    }
+    else
+    {
+      key_pos+= seg->length;
+    }
+  }
+  hp_make_key(keydef, (uchar*) file->lastkey, table->record[0]);
+  *rebuilt_key= (const uchar*) file->lastkey;
+}
+
+
 int ha_heap::index_read_map(uchar *buf, const uchar *key,
                             key_part_map keypart_map,
                             enum ha_rkey_function find_flag)
 {
   DBUG_ASSERT(inited==INDEX);
-  /*
-    When the index has blob key segments, the SQL layer's key buffer (e.g.
-    group_buff from end_update) uses Field_varstring format (2B length +
-    inline data) because Field_blob::new_key_field() returns Field_varstring.
-    But HEAP's hp_hashnr/hp_key_cmp expect hp_make_key format (4B length +
-    data pointer).  Rebuild the key from record[0] which has the correct
-    blob field layout.
-  */
   if (file->s->keydef[active_index].has_blob_seg)
-  {
-    hp_make_key(file->s->keydef + active_index, (uchar*) file->lastkey,
-                table->record[0]);
-    key= (const uchar*) file->lastkey;
-  }
+    rebuild_blob_key(file->s->keydef + active_index, key, active_index, &key);
   int error = heap_rkey(file,buf,active_index, key, keypart_map, find_flag);
   return error;
 }
@@ -314,11 +364,7 @@ int ha_heap::index_read_last_map(uchar *buf, const uchar *key,
 {
   DBUG_ASSERT(inited==INDEX);
   if (file->s->keydef[active_index].has_blob_seg)
-  {
-    hp_make_key(file->s->keydef + active_index, (uchar*) file->lastkey,
-                table->record[0]);
-    key= (const uchar*) file->lastkey;
-  }
+    rebuild_blob_key(file->s->keydef + active_index, key, active_index, &key);
   int error= heap_rkey(file, buf, active_index, key, keypart_map,
 		       HA_READ_PREFIX_LAST);
   return error;
@@ -329,11 +375,7 @@ int ha_heap::index_read_idx_map(uchar *buf, uint index, const uchar *key,
                                 enum ha_rkey_function find_flag)
 {
   if (file->s->keydef[index].has_blob_seg)
-  {
-    hp_make_key(file->s->keydef + index, (uchar*) file->lastkey,
-                table->record[0]);
-    key= (const uchar*) file->lastkey;
-  }
+    rebuild_blob_key(file->s->keydef + index, key, index, &key);
   int error = heap_rkey(file, buf, index, key, keypart_map, find_flag);
   return error;
 }
@@ -714,7 +756,46 @@ static int heap_prepare_hp_create_info(TABLE *table_arg, bool internal_table,
       }
       seg->start=   (uint) key_part->offset;
       seg->length=  (uint) key_part->length;
-      seg->flag=    key_part->key_part_flag;
+      /*
+        Use field->key_part_flag() instead of key_part->key_part_flag
+        because some SQL layer paths (SJ weedout, expression cache)
+        leave key_part_flag uninitialized.  Garbage HA_BLOB_PART bits
+        cause seg->length to be zeroed (the blob convention), corrupting
+        hash/compare for non-blob VARCHAR/VARBINARY keys.
+      */
+      seg->flag=    field->key_part_flag();
+      /*
+        HEAP blob key segments must have seg->length=0.  hp_hashnr()
+        advances key by seg->length (fixed part) THEN by 4+sizeof(ptr)
+        (blob encoding); non-zero length double-counts the advance
+        and hashes wrong data.  The SQL layer's key_part.length may be
+        pack_length() (e.g. DISTINCT key path) — override it here.
+
+        Also widen key_part->length to max_data_length() so the SQL
+        layer's new_key_field() (called via store_key constructor)
+        creates a Field_varstring large enough for the full blob data.
+        Without this, DISTINCT/sj-materialize lookup keys are truncated
+        to pack_length() bytes, causing hash mismatches and missing rows.
+      */
+      if (seg->flag & HA_BLOB_PART)
+      {
+        seg->length= 0;
+        /*
+          Widen key_part->length for blob segments where the SQL layer
+          set it to pack_length() (e.g. DISTINCT key path).  Skip when
+          key_part->length is 0, which means the GROUP BY key path
+          intentionally set it via field->key_length() = 0 and sized
+          the group buffer separately using the item's max_length.
+        */
+        uint32 blob_max= field->max_data_length();
+        if (key_part->length > 0 && key_part->length < blob_max)
+        {
+          uint len_delta= blob_max - key_part->length;
+          key_part->length= blob_max;
+          key_part->store_length+= len_delta;
+          pos->key_length+= len_delta;
+        }
+      }
 
       if (field->flags & (ENUM_FLAG | SET_FLAG))
         seg->charset= &my_charset_bin;
@@ -952,3 +1033,11 @@ maria_declare_plugin(heap)
   MariaDB_PLUGIN_MATURITY_STABLE /* maturity */
 }
 maria_declare_plugin_end;
+
+#ifdef HEAP_UNIT_TESTS
+int test_heap_prepare_hp_create_info(TABLE *table_arg, bool internal_table,
+                                     HP_CREATE_INFO *hp_create_info)
+{
+  return heap_prepare_hp_create_info(table_arg, internal_table, hp_create_info);
+}
+#endif

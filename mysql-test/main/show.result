@@ -36,8 +36,8 @@ show fields from test.t1 where field in
 (select * from (select column_name from information_schema.columns
 where table_name='t1' group by column_name) dt);
 Field	Type	Null	Key	Default	Extra
-nm	varchar(32)	YES		NULL	
 a	int(11)	YES		NULL	
+nm	varchar(32)	YES		NULL	
 drop table t1;
 #
 # MDEV-4621 select returns null for information_schema.statistics.collation field

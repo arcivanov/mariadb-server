@@ -480,10 +480,15 @@ int hp_rec_key_cmp(HP_KEYDEF *keydef, const uchar *rec1, const uchar *rec2,
       const uchar *data1;
       const uchar *data2;
 
-      if (len1 != len2)
-        return 1;
-      if (len1 == 0)
+      if (len1 == 0 && len2 == 0)
         continue;
+      /*
+        Only short-circuit on length mismatch for NO PAD collations.
+        PAD SPACE collations treat trailing spaces as insignificant,
+        so 'a' (len=1) and 'a  ' (len=3) must compare equal.
+      */
+      if ((seg->charset->state & MY_CS_NOPAD) && len1 != len2)
+        return 1;
 
       /* rec1: always input — dereference pointer */
       memcpy(&data1, pos1 + packlength, HP_PTR_SIZE);
@@ -630,10 +635,10 @@ int hp_key_cmp(HP_KEYDEF *keydef, const uchar *rec, const uchar *key,
       memcpy(&key_data, key + 4, HP_PTR_SIZE);
       key+= 4 + sizeof(uchar*);
 
-      if (rec_blob_len != key_blob_len)
-        return 1;
-      if (rec_blob_len == 0)
+      if (rec_blob_len == 0 && key_blob_len == 0)
         continue;
+      if ((seg->charset->state & MY_CS_NOPAD) && rec_blob_len != key_blob_len)
+        return 1;
 
       /* rec is stored — materialize from chain */
       {
@@ -733,7 +738,25 @@ void hp_make_key(HP_KEYDEF *keydef, uchar *key, const uchar *rec)
       set_if_smaller(char_length, seg->length); /* QQ: ok to remove? */
     }
     if (seg->type == HA_KEYTYPE_VARTEXT1)
-      char_length+= seg->bit_start;             /* Copy also length */
+    {
+      /*
+        VARCHAR segment: always write 2-byte length prefix to match
+        hp_hashnr/hp_key_cmp expectations, regardless of seg->bit_start.
+        Read actual data length from the record's pack_length bytes, then
+        store as 2 bytes in the key followed by seg->length bytes of data.
+      */
+      uint pack_length= seg->bit_start;
+      size_t varchar_len= (pack_length == 1 ? (size_t) *(uchar*) pos :
+                           uint2korr(pos));
+      set_if_smaller(varchar_len, (size_t) seg->length);
+      int2store(key, (uint16) varchar_len);
+      key+= 2;
+      memcpy(key, pos + pack_length, varchar_len);
+      if (varchar_len < (size_t) seg->length)
+        memset(key + varchar_len, 0, seg->length - varchar_len);
+      key+= seg->length;
+      continue;
+    }
     else if (seg->type == HA_KEYTYPE_BIT && seg->bit_length)
     {
       *key++= get_rec_bits(rec + seg->bit_pos,

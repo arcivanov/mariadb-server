@@ -20502,11 +20502,12 @@ Field *create_tmp_field(TABLE *table, Item *item,
                         Field **default_field,
                         bool group, bool modify_item,
                         bool table_cant_handle_bit_fields,
-                        bool make_copy_field)
+                        bool make_copy_field,
+                        bool is_heap_engine= false)
 {
   Tmp_field_src src;
   Tmp_field_param prm(group, modify_item, table_cant_handle_bit_fields,
-                      make_copy_field);
+                      make_copy_field, is_heap_engine);
   Field *result= item->create_tmp_field_ex(table->in_use->mem_root,
                                            table, &src, &prm);
   if (is_json_type(item) && make_json_valid_expr(table, result))
@@ -20719,6 +20720,15 @@ TABLE *Create_tmp_table::start(THD *thd,
       m_distinct= 0;                           // Can't use distinct
   }
 
+  /*
+    Early engine prediction: reclength is not yet known (fields not added),
+    so pass 0.  pick_engine() with reclength=0 only skips the
+    reclength > HA_MAX_REC_LENGTH check, which choose_engine() will
+    verify later with the real value.  Since HEAP promotion reduces
+    reclength, this is conservative.
+  */
+  m_heap_expected= (pick_engine(thd, 0) == heap_hton);
+
   m_alloced_field_count= param->field_count+param->func_count+param->sum_func_count;
   DBUG_ASSERT(m_alloced_field_count);
   const uint field_count= m_alloced_field_count;
@@ -20846,6 +20856,8 @@ bool Create_tmp_table::add_fields(THD *thd,
       distinct_record_structure= true;
     }
   li.rewind();
+  if (m_heap_expected)
+    Type_handler::set_creating_heap_tmp_table(true);
   while ((item=li++))
   {
     uint uneven_delta;
@@ -20896,7 +20908,8 @@ bool Create_tmp_table::add_fields(THD *thd,
             create_tmp_field(table, arg, &copy_func,
                              tmp_from_field, &m_default_field[fieldnr],
                              m_group != 0, not_all_columns,
-                             distinct_record_structure , false);
+                             distinct_record_structure, false,
+                             m_heap_expected);
           if (!new_field)
             goto err;					// Should be OOM
           tmp_from_field++;
@@ -20960,7 +20973,8 @@ bool Create_tmp_table::add_fields(THD *thd,
                          */
                          item->marker == MARKER_NULL_KEY ||
                          param->bit_fields_as_long,
-                         param->force_copy_fields);
+                         param->force_copy_fields,
+                         m_heap_expected);
       if (unlikely(!new_field))
       {
         if (unlikely(thd->is_fatal_error))
@@ -21011,6 +21025,7 @@ bool Create_tmp_table::add_fields(THD *thd,
 
   DBUG_ASSERT(fieldnr == m_field_count[other] + m_field_count[distinct]);
   DBUG_ASSERT(m_blob_count == m_blobs_count[other] + m_blobs_count[distinct]);
+  Type_handler::set_creating_heap_tmp_table(false);
   share->fields= fieldnr;
   share->blob_fields= m_blob_count;
   table->field[fieldnr]= 0;                     // End marker
@@ -21025,8 +21040,31 @@ bool Create_tmp_table::add_fields(THD *thd,
   DBUG_RETURN(false);
 
 err:
+  Type_handler::set_creating_heap_tmp_table(false);
   thd->mem_root= mem_root_save;
   DBUG_RETURN(true);
+}
+
+
+/**
+  Determine which storage engine to use for this temporary table.
+
+  @param thd       Session
+  @param reclength Record length to evaluate against engine limits
+
+  @return heap_hton if HEAP is suitable, TMP_ENGINE_HTON (Aria) otherwise.
+*/
+
+handlerton *Create_tmp_table::pick_engine(THD *thd, uint reclength)
+{
+  if (m_using_unique_constraint ||
+      reclength > HA_MAX_REC_LENGTH ||
+      (thd->variables.big_tables &&
+       !(m_select_options & SELECT_SMALL_RESULT)) ||
+      (m_select_options & TMP_TABLE_FORCE_MYISAM) ||
+      thd->variables.tmp_memory_table_size == 0)
+    return TMP_ENGINE_HTON;
+  return heap_hton;
 }
 
 
@@ -21035,36 +21073,14 @@ bool Create_tmp_table::choose_engine(THD *thd, TABLE *table,
 {
   TABLE_SHARE *share= table->s;
   DBUG_ENTER("Create_tmp_table::choose_engine");
-  /*
-    If result table is small; use a heap, otherwise TMP_TABLE_HTON (Aria).
-    HEAP now supports blob columns via continuation chains, so blob_fields
-    alone no longer forces a disk-based engine.  We still fall back to disk
-    when reclength exceeds HA_MAX_REC_LENGTH (HEAP's fixed-width rows would
-    waste too much memory for very wide records).
-    In the future we should try making storage engine selection more dynamic.
-  */
+  handlerton *hton= pick_engine(thd, share->reclength);
+  share->db_plugin= ha_lock_engine(0, hton);
+  table->file= get_new_handler(share, &table->mem_root, share->db_type());
 
-  if (m_using_unique_constraint ||
-      share->reclength > HA_MAX_REC_LENGTH ||
-      (thd->variables.big_tables &&
-       !(m_select_options & SELECT_SMALL_RESULT)) ||
-      (m_select_options & TMP_TABLE_FORCE_MYISAM) ||
-      thd->variables.tmp_memory_table_size == 0)
-  {
-    share->db_plugin= ha_lock_engine(0, TMP_ENGINE_HTON);
-    table->file= get_new_handler(share, &table->mem_root,
-                                 share->db_type());
-    if (m_group &&
-	(param->group_parts > table->file->max_key_parts() ||
-	 param->group_length > table->file->max_key_length()))
-      m_using_unique_constraint= true;
-  }
-  else
-  {
-    share->db_plugin= ha_lock_engine(0, heap_hton);
-    table->file= get_new_handler(share, &table->mem_root,
-                                 share->db_type());
-  }
+  if (hton != heap_hton && m_group &&
+      (param->group_parts > table->file->max_key_parts() ||
+       param->group_length > table->file->max_key_length()))
+    m_using_unique_constraint= true;
   DBUG_RETURN(!table->file);
 }
 
@@ -21352,10 +21368,42 @@ bool Create_tmp_table::finalize(THD *thd,
           (*cur_group->item)->base_flags&= ~item_base_t::MAYBE_NULL;
         }
 
+        /*
+          HEAP blob GROUP BY key field length fixup.
+
+          Why this is needed in the SQL layer:
+          Field_blob::key_length() returns 0 because blobs use prefix
+          indexing (the key stores a pointer, not inline data). When
+          HEAP promotes a wide VARCHAR to BLOB (to save per-row space
+          in fixed-width HEAP rows), the GROUP BY key part setup above
+          sets m_key_part_info->length = field->key_length() = 0.
+          new_key_field() then creates a Field_varstring(length=0),
+          which truncates all group key data to zero bytes, causing
+          every row to hash into the same group (wrong results).
+
+          Fix: use the Item's max_length for the Field_varstring
+          passed to new_key_field(). This matches what
+          calc_group_buffer() used to size m_group_buff.
+
+          We keep m_key_part_info->length at 0 because the HEAP engine
+          reads seg->length for blob key segments and derives the blob
+          packlength from it (see hp_rb_make_key / hp_hashnr).
+
+          This is HEAP-specific SQL-layer code, analogous to how
+          Aria/MyISAM handle blobs in GROUP BY via their own SQL-layer
+          path: create_internal_tmp_table() drops share->keys to 0
+          and uses MARIA_UNIQUEDEF / MI_UNIQUEDEF with _ma_unique_hash
+          / _mi_unique_hash, which read blob data directly from the
+          record via seg->start. HEAP has no such UNIQUEDEF mechanism,
+          so we compensate here instead.
+        */
+        uint32 key_field_length= m_key_part_info->length;
+        if (!key_field_length && (field->flags & BLOB_FLAG))
+          key_field_length= (*cur_group->item)->max_length;
 	if (!(cur_group->field= field->new_key_field(thd->mem_root,table,
                                                      m_group_buff +
                                                      MY_TEST(maybe_null),
-                                                     m_key_part_info->length,
+                                                     key_field_length,
                                                      field->null_ptr,
                                                      field->null_bit)))
 	  goto err; /* purecov: inspected */
@@ -21409,8 +21457,19 @@ bool Create_tmp_table::finalize(THD *thd,
       */
       share->uniques= 1;
     }
+    /*
+      HEAP handles NULL per-segment in its hash index (seg->null_bit/
+      null_pos in hp_rec_key_cmp), so it does not need the extra
+      null-bits helper key part.  share->uniques is still set so that
+      HEAP-to-disk conversion via create_internal_tmp_table() can
+      build MARIA_UNIQUEDEF / MI_UNIQUEDEF — that path creates its
+      own per-segment null handling from the field's null_bit/null_pos.
+    */
+    bool need_null_key_part= share->uniques &&
+                             share->db_type() != heap_hton &&
+                             null_pack_length[distinct];
     keyinfo->user_defined_key_parts= m_field_count[distinct] +
-       (share->uniques ? MY_TEST(null_pack_length[distinct]) : 0);
+       MY_TEST(need_null_key_part);
     keyinfo->ext_key_parts= keyinfo->user_defined_key_parts;
     keyinfo->usable_key_parts= keyinfo->user_defined_key_parts;
     table->distinct= 1;
@@ -21453,7 +21512,7 @@ bool Create_tmp_table::finalize(THD *thd,
       blobs can distinguish NULL from 0. This extra field is not needed
       when we do not use UNIQUE indexes for blobs.
     */
-    if (null_pack_length[distinct] && share->uniques)
+    if (need_null_key_part)
     {
       m_key_part_info->null_bit=0;
       m_key_part_info->offset= null_pack_base[distinct];
@@ -21463,7 +21522,7 @@ bool Create_tmp_table::finalize(THD *thd,
                                              (uchar*) 0,
                                              (uint) 0,
                                              Field::NONE,
-                                             &null_clex_str, &my_charset_bin);
+                                             &empty_clex_str, &my_charset_bin);
       if (!m_key_part_info->field)
         goto err;
       m_key_part_info->field->init(table);
@@ -21573,7 +21632,37 @@ bool Create_tmp_table::add_schema_fields(THD *thd, TABLE *table,
     const ST_FIELD_INFO &def= defs[fieldnr];
     Record_addr addr(def.nullable());
     const Type_handler *h= def.type_handler();
-    Field *field= h->make_schema_field(&table->mem_root, table, addr, def);
+    Field *field;
+    /*
+      HEAP varchar→blob promotion for I_S tables: HEAP uses fixed-width
+      rows, so wide VARCHARs waste their full declared octet_length per
+      row.  BLOBs store only actual data in continuation chains.  This
+      is the same promotion that type_handler_for_tmp_table() does at
+      CONVERT_IF_BIGGER_TO_BLOB (512 chars), just at a lower threshold
+      for HEAP.
+    */
+    if (m_heap_expected && h == &type_handler_varchar &&
+        def.char_length() * system_charset_info->mbmaxlen >
+          HEAP_CONVERT_IF_BIGGER_TO_BLOB)
+    {
+      /*
+        Match Type_handler_varchar::make_schema_field() blob creation:
+        packlength=4, system_charset_info, octet_length = char_length *
+        mbmaxlen.  field_length stores the original octet_length so that
+        create_tmp_field_from_item_field() can de-promote back to VARCHAR
+        for CREATE TABLE ... AS SELECT.
+      */
+      LEX_CSTRING name= def.name();
+      uint32 octet_length= (uint32) def.char_length() *
+                            system_charset_info->mbmaxlen;
+      field= new (&table->mem_root)
+        Field_blob(addr.ptr(), addr.null_ptr(), addr.null_bit(), Field::NONE,
+                   &name, share, 4, system_charset_info);
+      if (field)
+        field->field_length= octet_length;
+    }
+    else
+      field= h->make_schema_field(&table->mem_root, table, addr, def);
     if (!field)
     {
       thd->mem_root= mem_root_save;

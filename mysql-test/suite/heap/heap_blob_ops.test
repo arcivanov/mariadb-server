@@ -1,0 +1,112 @@
+--source include/have_sequence.inc
+--source include/not_embedded.inc
+
+--echo #
+--echo # MDEV-38975: Blob/text operations exercising HEAP internal temp tables
+--echo #
+
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, k INT, text_col TEXT);
+INSERT INTO t1 (k, text_col) VALUES
+  (1, 'alpha'), (1, 'alpha'), (1, 'beta'),
+  (2, 'gamma'), (2, 'gamma'), (2, 'delta'),
+  (3, 'alpha'), (3, 'epsilon'), (3, NULL),
+  (4, NULL), (4, NULL), (4, 'beta');
+
+--echo #
+--echo # COUNT(DISTINCT text_col)
+--echo #
+SELECT COUNT(DISTINCT text_col) FROM t1;
+
+--echo #
+--echo # COUNT(DISTINCT text_col) with GROUP BY
+--echo #
+SELECT k, COUNT(DISTINCT text_col) FROM t1 GROUP BY k ORDER BY k;
+
+--echo #
+--echo # IN-subquery with blob/text
+--echo #
+CREATE TABLE t2 (text_col TEXT);
+INSERT INTO t2 VALUES ('alpha'), ('delta');
+SELECT id, text_col FROM t1 WHERE text_col IN (SELECT text_col FROM t2) ORDER BY id;
+
+--echo #
+--echo # GROUP BY text_col ORDER BY aggregate LIMIT
+--echo #
+SELECT text_col, COUNT(*) AS cnt FROM t1 GROUP BY text_col ORDER BY cnt DESC, text_col LIMIT 3;
+
+--echo #
+--echo # GROUP BY text_col WITH ROLLUP
+--echo #
+--sorted_result
+SELECT text_col, COUNT(*) FROM t1 GROUP BY text_col WITH ROLLUP;
+
+--echo #
+--echo # GROUP BY multiple columns WITH ROLLUP
+--echo #
+--sorted_result
+SELECT k, text_col, COUNT(*) FROM t1 GROUP BY k, text_col WITH ROLLUP;
+
+--echo #
+--echo # Window function with blob in SELECT list
+--echo #
+SELECT id, text_col, ROW_NUMBER() OVER (PARTITION BY k ORDER BY id) AS rn
+FROM t1 WHERE k <= 2 ORDER BY id;
+
+--echo #
+--echo # RANK with blob column
+--echo #
+SELECT text_col, k, RANK() OVER (ORDER BY text_col) AS rnk
+FROM t1 WHERE text_col IS NOT NULL ORDER BY text_col, k;
+
+--echo #
+--echo # Non-recursive CTE materializing blob column
+--echo #
+WITH cte AS (SELECT text_col, k FROM t1 WHERE k <= 2)
+SELECT DISTINCT text_col FROM cte ORDER BY text_col;
+
+--echo #
+--echo # CTE with self-join on blob column
+--echo #
+WITH cte AS (SELECT text_col, k FROM t1 WHERE text_col IS NOT NULL)
+SELECT COUNT(*) FROM cte a JOIN cte b ON a.k = b.k AND a.text_col = b.text_col;
+
+--echo #
+--echo # CTE referenced twice (forces materialization)
+--echo #
+WITH cte AS (SELECT DISTINCT text_col FROM t1 WHERE text_col IS NOT NULL)
+SELECT a.text_col, b.text_col
+FROM cte a JOIN cte b ON a.text_col > b.text_col ORDER BY a.text_col, b.text_col;
+
+DROP TABLE t1, t2;
+
+--echo #
+--echo # HEAP_CONVERT_IF_BIGGER_TO_BLOB promotion scope: same as the standard
+--echo # CONVERT_IF_BIGGER_TO_BLOB — internal temporary tables only, never
+--echo # user-created tables (even ENGINE=MEMORY).
+--echo #
+CREATE TABLE t_src (id INT, v100 VARCHAR(100));
+INSERT INTO t_src VALUES (1, 'alpha'), (1, 'beta'), (2, 'gamma'), (2, 'delta');
+
+--echo # Internal HEAP temp table (GROUP BY): varchar(100) > 32 bytes, promoted
+--echo # Metadata type 252 = BLOB
+--enable_metadata
+SELECT v100, COUNT(*) AS cnt FROM t_src GROUP BY v100 ORDER BY v100 LIMIT 1;
+--disable_metadata
+
+--echo # Internal non-HEAP temp table (Aria): varchar(100) < 512 chars, not promoted
+--echo # Metadata type 253 = VARCHAR
+SET @save_tmp_memory_table_size= @@tmp_memory_table_size;
+SET tmp_memory_table_size= 0;
+--enable_metadata
+SELECT v100, COUNT(*) AS cnt FROM t_src GROUP BY v100 ORDER BY v100 LIMIT 1;
+--disable_metadata
+SET tmp_memory_table_size= @save_tmp_memory_table_size;
+
+--echo # User-created ENGINE=MEMORY table: no promotion, VARCHAR stays VARCHAR
+CREATE TABLE t_heap ENGINE=MEMORY AS SELECT * FROM t_src;
+SHOW CREATE TABLE t_heap;
+DROP TABLE t_heap;
+
+DROP TABLE t_src;
+
+--echo # End of MDEV-38975 blob operations tests
