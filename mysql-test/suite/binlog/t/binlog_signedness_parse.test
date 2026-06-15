@@ -71,7 +71,7 @@ RESET MASTER;
 --echo #         and consumes a signedness bit, so a numeric column following it
 --echo #         still reads the correct bit (signed INT, YEAR, unsigned INT).
 --echo #
-CREATE TABLE t1(c_signed INT, c_year YEAR, c_unsigned INT UNSIGNED);
+CREATE TABLE t1(c_signed INT, c_year YEAR, c_signed2 INT);
 INSERT INTO t1(c_signed) VALUES(-1);
 --source suite/binlog/include/print_optional_metadata.inc
 

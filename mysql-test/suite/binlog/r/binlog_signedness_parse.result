@@ -66,11 +66,11 @@ RESET MASTER;
 #         and consumes a signedness bit, so a numeric column following it
 #         still reads the correct bit (signed INT, YEAR, unsigned INT).
 #
-CREATE TABLE t1(c_signed INT, c_year YEAR, c_unsigned INT UNSIGNED);
+CREATE TABLE t1(c_signed INT, c_year YEAR, c_signed2 INT);
 INSERT INTO t1(c_signed) VALUES(-1);
 # Columns(`c_signed` INT,
 #         `c_year` YEAR UNSIGNED,
-#         `c_unsigned` INT UNSIGNED)
+#         `c_signed2` INT)
 DROP TABLE t1;
 RESET MASTER;
 SET GLOBAL binlog_row_metadata = NO_LOG;
