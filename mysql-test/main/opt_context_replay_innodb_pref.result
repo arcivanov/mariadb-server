@@ -215,7 +215,7 @@ select @explain_output;
                         "filtered": 20
                     },
                     "buffer_type": "flat",
-                    "buffer_size": "2Kb",
+                    "buffer_size": "2KiB",
                     "join_type": "BNL",
                     "attached_condition": "tt2.c1 = tt1.c1"
                 }
@@ -261,7 +261,7 @@ EXPLAIN
             "filtered": 20
           },
           "buffer_type": "flat",
-          "buffer_size": "2Kb",
+          "buffer_size": "2KiB",
           "join_type": "BNL",
           "attached_condition": "tt2.c1 = tt1.c1"
         }
