@@ -1695,7 +1695,7 @@ SESSION_VALUE	OFF
 DEFAULT_VALUE	OFF
 VARIABLE_SCOPE	SESSION
 VARIABLE_TYPE	BOOLEAN
-VARIABLE_COMMENT	When the SQL layer advises a full scan, acquire a single table lock instead of locking each scanned row individually. This is faster, at the cost of less granular (table-level instead of record-level) locking.
+VARIABLE_COMMENT	When the SQL layer advises a full scan, acquire a single table lock instead of locking each scanned row individually. This is faster, at the cost of less granular (table-level instead of record-level) locking
 NUMERIC_MIN_VALUE	NULL
 NUMERIC_MAX_VALUE	NULL
 NUMERIC_BLOCK_SIZE	NULL

@@ -41,6 +41,7 @@ usr/share/mariadb/binary-configure
 usr/share/mariadb/magic
 usr/share/mariadb/maria_add_gis_sp.sql # mariadb-server-core.install has *_bootstrap.sql
 usr/share/mariadb/mariadb.logrotate
+usr/share/mariadb/mariadb-test/EXTRA_SERVER_QUICKSTART.txt
 usr/share/mariadb/mariadb-test/asan.supp
 usr/share/mariadb/mariadb-test/lsan.supp
 usr/share/mariadb/mariadb-test/unstable-tests

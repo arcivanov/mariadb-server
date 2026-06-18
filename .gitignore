@@ -633,3 +633,4 @@ tests/mariadb-client-test
 versioninfo_dll.rc
 versioninfo_exe.rc
 win/packaging/ca/symlinks.cc
+plugin/auth_pam/testing/mariadb_mtr
