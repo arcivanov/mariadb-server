@@ -140,18 +140,7 @@ void opt_trace_print_expanded_query(THD *thd, SELECT_LEX *select_lex,
     The output is not very pretty lots of back-ticks, the output
     is as the one in explain extended , lets try to improved it here.
   */
-
-  StringBuffer<1024> escaped_str(system_charset_info);
-  if (st_append_escaped(&escaped_str, &str) == 0)
-  {
-    writer->add("expanded_query", escaped_str.c_ptr_safe(), 
-                                  escaped_str.length());
-  }
-  else
-  {
-    writer->add("expanded_query", 
-      "Error: failed to escape query string for JSON output");
-  }
+  writer->add("expanded_query", str.c_ptr_safe(), str.length());
 }
 
 void opt_trace_disable_if_no_security_context_access(THD *thd)

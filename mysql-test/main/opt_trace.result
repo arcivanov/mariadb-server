@@ -12968,7 +12968,7 @@ x
 𝄞
 SELECT json_valid(trace) AS valid_json, json_detailed(json_extract(trace,'$**.expanded_query')) FROM information_schema.optimizer_trace;
 valid_json	json_detailed(json_extract(trace,'$**.expanded_query'))
-1	["Error: failed to escape query string for JSON output"]
+1	["select '𝄞' AS x"]
 SET NAMES DEFAULT;
 set optimizer_trace=@saved_optimizer_trace;
 # End of 10.11 tests

@@ -223,7 +223,7 @@ int main(int args, char **argv)
     ok(!w.invalid_json, "Empty string value is valid");
   }
 
-  /* add_str does not escape: special chars are passed through verbatim */
+  /* add_str does escaping */
   {
     Json_writer w;
     w.start_object();
@@ -231,26 +231,33 @@ int main(int args, char **argv)
     w.end_object();
     ok(json_output_eq(w,
        "{\n"
-       "  \"s\": \"with\"quote\"\n"
+       "  \"s\": \"with\\\"quote\"\n"
        "}"),
-       "String with embedded quote (no escaping)");
+       "String with embedded quote properly escaped");
     ok(!w.invalid_json,
        "String with embedded quote remains valid for this writer");
   }
 
   {
     Json_writer w;
+    /*
+      Char  latin1  UTF-8
+      é       E9      C3 A9
+      ö       F6      C3 B6
+      ü       FC      C3 BC
+    */
     String latin1_str("\xe9\xf6\xfc", 3, &my_charset_latin1);
+
     w.start_object();
     w.add_member("s").add_str(latin1_str);
     w.end_object();
     ok(json_output_eq(w,
        "{\n"
-       "  \"s\": \"\xe9\xf6\xfc\"\n"
+       "  \"s\": \"\xc3\xa9\xc3\xb6\xc3\xbc\"\n"
        "}"),
-       "Latin-1 encoded string bytes pass through unchanged");
+       "Characters written in latin1 are transcoded into utf-8");
     ok(!w.invalid_json,
-       "Latin-1 encoded string bytes pass through unchanged and stay valid");
+       "Latin-1 is converted to utf-8 and remains valid");
   }
 
   {
@@ -595,9 +602,7 @@ int main(int args, char **argv)
     const char value_with_nul[]= { 'a', '\0', 'b' };
     const char expected[]=
        "{\n"
-       "  \"arr\": [\n"
-       "    \"a\0b\"\n"
-       "  ]\n"
+       "  \"arr\": [\"a\\u0000b\"]\n"
        "}";
     w.start_object();
     w.add_member("arr");
@@ -606,8 +611,8 @@ int main(int args, char **argv)
     w.end_array();
     w.end_object();
     ok(json_output_eq_len(w, expected, sizeof(expected) - 1),
-       "Named array element with embedded NUL is preserved");
-    ok(!w.invalid_json, "Embedded-NUL array element keeps writer valid");
+       "NUL character is escaped as \\u0000");
+    ok(!w.invalid_json, "Writing a string with NUL character produces valid JSON");
   }
 
   {
@@ -1053,8 +1058,7 @@ int main(int args, char **argv)
 
   {
     Json_writer w;
-    String s;
-    s.append("hello", 5);
+    String s("hello", 5, &my_charset_utf8mb4_general_ci);
     w.start_object();
     w.add_member("msg").add_str(s);
     w.end_object();
